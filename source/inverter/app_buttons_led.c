@@ -26,7 +26,6 @@ typedef struct
 {
     spwm_t         *spwm;
     btn_debounce_t  btn_start_stop;
-    btn_debounce_t  btn_tab_cal;
     uint32_t        led_blink_cnt;
     bool            led_state;
 } app_ctx_t;
@@ -107,7 +106,7 @@ static void AppButtonsLed_Task(void *pvParameters)
             if (SPWM_IsActive(ctx->spwm))          /* SOFTSTART или RUN → стоп */
             {
                 SPWM_Stop(ctx->spwm);
-                PRINTF("STOPED\r\n");
+                PRINTF("STOPPED\r\n");
             }
             else if (ctx->spwm->state != SPWM_STATE_FAULT)
             {
@@ -123,21 +122,6 @@ static void AppButtonsLed_Task(void *pvParameters)
                               BOARD_INITPINS_FAULT_LED_PIN, 0U);
                 PRINTF("FAULT CLEARED\r\n");
             }
-        }
-
-        /* ---- Опрос кнопки TABLE/CALC ---- */
-        uint32_t tc_raw = GPIO_PinRead(BOARD_INITPINS_TAB_CAL_GPIO,
-                                        BOARD_INITPINS_TAB_CAL_PIN);
-        btn_update(&ctx->btn_tab_cal, tc_raw);
-
-        if (btn_is_pressed(&ctx->btn_tab_cal))
-        {
-            sine_mode_t cur = ctx->spwm->sine.mode;
-            sine_mode_t next = (cur == SINE_MODE_TABLE) ? SINE_MODE_CALC
-                                                        : SINE_MODE_TABLE;
-            SPWM_SetSineMode(ctx->spwm, next);
-            PRINTF("Sine mode: %s\r\n",
-                   (next == SINE_MODE_TABLE) ? "TABLE" : "CALC");
         }
 
         /* ---- Мигание FAULT LED при аварии ---- */

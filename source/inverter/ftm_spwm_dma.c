@@ -78,8 +78,8 @@ static void SPWM_DMA_ReconfTCD(spwm_t *spwm)
      * Destination = CONTROLS[1].CnV (C1V = второй фронт).
      * CONTROLS[0].CnV (C0V = первый фронт) = 0 — зафиксирован FTM_SetupPwmMode.
      * DMA изменяет только C1V → ширина импульса = C1V − 0 = sine_value.
-     * При C0V=0 и CPWMS=1 (center-aligned): выход HIGH от 0 до C1V в каждом
-     * полупериоде → скважность = C1V/MOD.
+        * В текущей конфигурации CPWMS=0 (edge-aligned combined mode KE18):
+        * выход HIGH от CNT=0 до CNT=C1V → скважность = C1V/(MOD+1).
      */
     uint32_t cnv_reg = (uint32_t)&(FTM1_PERIPHERAL->CONTROLS[1].CnV);
 
@@ -127,6 +127,17 @@ static void SPWM_RuntimeArm(spwm_t *spwm)
     EnableIRQ(DMA0_IRQn);
     EnableIRQ(DMA_Error_IRQn);
 
+    /* Надёжный путь измерения: software-trigger ADC из DMA ISR (20 кГц).
+     * Так измерение не зависит от PDB/HW-trigger цепочки и всегда привязано к ISR. */
+    ADC12_EnableHardwareTrigger(ADC0_PERIPHERAL, false);
+    g_spwm.adc_raw_last = 0U;
+    ADC12_SetChannelConfig(ADC0_PERIPHERAL, 0U, &ADC0_channelsConfig[0]); /* Start first conversion. */
+
+    /* FTM1_CH0 match at C0V=0 generates one DMA request at the start of each PWM period.
+     * KE18 requires both CHIE and DMA bits set in C0SC for channel DMA requests. */
+    SPWM_FTM_BASE->CONTROLS[0].CnSC |= FTM_CnSC_CHIE_MASK;
+    FTM_EnableDmaTransfer(SPWM_FTM_BASE, SPWM_FTM_CHNL, true);
+
     EDMA_EnableChannelRequest(DMA0, DMA_CH0_DMA_CHANNEL);
     PDB_Enable(PDB0, true);
     PDB_DoLoadValues(PDB0);   /* LDOK: загружает MOD=750, IDLY=5, DLY0=375 — только при PDBEN=1 */
@@ -147,6 +158,8 @@ static void SPWM_RuntimeArm(spwm_t *spwm)
 static void SPWM_RuntimeDisarm(void)
 {
     EDMA_DisableChannelRequest(DMA0, DMA_CH0_DMA_CHANNEL);
+    FTM_EnableDmaTransfer(SPWM_FTM_BASE, SPWM_FTM_CHNL, false);
+    SPWM_FTM_BASE->CONTROLS[0].CnSC &= ~FTM_CnSC_CHIE_MASK;
     DisableIRQ(DMA0_IRQn);
     DisableIRQ(DMA_Error_IRQn);
     NVIC_ClearPendingIRQ(DMA0_IRQn);
@@ -190,6 +203,9 @@ void SPWM_Init(spwm_t *spwm, sine_mode_t mode)
 
     /* Движок не запускаем здесь: старт только по кнопке в SPWM_Start(). */
     SPWM_RuntimeDisarm();
+    spwm->i_meas = 0.0f;
+    spwm->isr_count = 0U;
+    spwm->mon_partial_window = 0U;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -208,6 +224,8 @@ void SPWM_Start(spwm_t *spwm)
     PI_SetEnabled(&spwm->pi, false);
     PI_Reset(&spwm->pi);
     GFLIB_RampInit_FLT_Ci(0.0f, &spwm->ramp);
+    spwm->isr_count = 0U;
+    spwm->mon_partial_window = 1U;
     spwm->state = SPWM_STATE_SOFTSTART;
     GPIO_PinWrite(BOARD_INITPINS_FAULT_LED_GPIO, BOARD_INITPINS_FAULT_LED_PIN, 0U);
 }
@@ -228,6 +246,9 @@ void SPWM_Stop(spwm_t *spwm)
         SPWM_RuntimeDisarm();
     }
 
+    spwm->i_meas = 0.0f;
+    spwm->isr_count = 0U;
+    spwm->mon_partial_window = 1U;
     spwm->state = SPWM_STATE_IDLE;
     GPIO_PinWrite(BOARD_INITPINS_FAULT_LED_GPIO, BOARD_INITPINS_FAULT_LED_PIN, 0U);
 }
@@ -249,6 +270,8 @@ void SPWM_FaultHandler(spwm_t *spwm, uint32_t fault_mask)
 
     PI_SetEnabled(&spwm->pi, false);
     GFLIB_RampInit_FLT_Ci(0.0f, &spwm->ramp);
+    spwm->isr_count = 0U;
+    spwm->mon_partial_window = 1U;
     GPIO_PinWrite(BOARD_INITPINS_FAULT_LED_GPIO, BOARD_INITPINS_FAULT_LED_PIN, 1U);
 }
 
@@ -350,19 +373,18 @@ void DMA0_IRQHandler(void)
         (uint32_t)&g_spwm.cnv_buf[g_spwm.buf_idx];
 
     /*
-     * 4. Читаем результат ADC0 SE1.
-     *    ADC был запущен PDB0 в t=25 мкс (pretrigger delay=375 тактов bus).
-     *    Готов через ~0.87 мкс. Сейчас t=~333 нс — результат НЕ готов!
-     *
-     *    Это нормально: мы читаем R[0] предыдущего периода (задержка 1 период).
-     *    R[0] сброшен (COCO=0) после чтения, PDB0 запустит следующее
-     *    преобразование в центре ТЕКУЩЕГО периода (t=25 мкс).
-     *    Результат будем читать в следующем ISR.
-     *
-     *    Если COCO=0 (первый вызов после старта) — R[0] = 0, i_meas = 0 А.
-     *    Это безопасно: PI отключён, идёт SOFTSTART.
+     * 4. Читаем ADC только когда COCO=1; иначе используем последний валидный код.
+     *    В конце ISR запускаем следующую software-conversion (SC1A write).
      */
-    uint16_t adc_raw = (uint16_t)(ADC0->R[0] & 0x0FFFU);
+    uint16_t adc_raw = g_spwm.adc_raw_last;
+    if ((ADC0_PERIPHERAL->SC1[0] & ADC_SC1_COCO_MASK) != 0U)
+    {
+        adc_raw = (uint16_t)(ADC0_PERIPHERAL->R[0] & 0x0FFFU);
+        g_spwm.adc_raw_last = adc_raw;
+    }
+
+    /* Start next conversion for the next ISR period. */
+    ADC12_SetChannelConfig(ADC0_PERIPHERAL, 0U, &ADC0_channelsConfig[0]);
 
     /* 5. Управляющий алгоритм */
     SPWM_DMA_ISR(&g_spwm, adc_raw);

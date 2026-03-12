@@ -5,9 +5,9 @@
  * ─── Периферия (board/peripherals.c, board/pin_mux.c) ──────────────────────
  *  FTM1      — Combined PWM CH0/CH1, PTB2(pin32)/PTB3(pin31), f_sw=20кГц
  *              deadTime=12 такта≈100нс. Инициализирован в peripherals.c.
- *              MOD = SPWM_MOD_VALUE = 2999 при 120МГц (center-aligned).
+ *              MOD = SPWM_MOD_VALUE = 5999 при 120МГц (edge-aligned).
  *  PDB0      — источник DMA-запроса kDmaRequestMux0PDB0 (IDLY=5 тактов).
- *              Запускается от FTM1 init-trigger через TRGMUX.
+ *              Запускается от FTM1 CH0 trigger через TRGMUX (input0).
  *  DMA0 CH0  — ping-pong, INTMAJOR → DMA0_IRQHandler каждые 50 мкс.
  *              SADDR: cnv_buf[buf_idx] → DADDR: FTM1->CONTROLS[1].CnV (C1V).
  *              C0V=0 фиксирован, ширина имп. = C1V/MOD. soff=0, doff=0, NBYTES=4.
@@ -77,14 +77,16 @@
  *   I [А] = adc_raw × SPWM_ADC_CURRENT_SCALE
  *   SPWM_ADC_CURRENT_SCALE = Vref / FullScale / R_shunt_Ohm / gain
  *
- * Пример для R_shunt=10 мОм, gain=20:
- *   SCALE = 3.3 / 4095 / 0.010 / 20 = 0.00402 А/ЕАЦ
+ * Для текущего железа: R_shunt=22 мОм, gain=10:
+ *   SCALE = 3.3 / 4095 / 0.022 / 10 = 0.003663 А/ЕАЦ
  *
  * ВАЖНО: откалибровать под реальный шунт и усилитель!
  * ─────────────────────────────────────────────────────────────────────────── */
 #define SPWM_ADC_VREF_V         3.3f
 #define SPWM_ADC_FULL_SCALE     4095.0f
-#define SPWM_ADC_CURRENT_SCALE  0.00402f   /* А / ЕАЦ — подобрать под железо */
+#define SPWM_SHUNT_OHM          0.022f
+#define SPWM_AMP_GAIN           10.0f
+#define SPWM_ADC_CURRENT_SCALE  (SPWM_ADC_VREF_V / SPWM_ADC_FULL_SCALE / SPWM_SHUNT_OHM / SPWM_AMP_GAIN)
 
 /* ───────────────────────────────────────────────────────────────────────────
  * Защитные пороги
@@ -132,10 +134,12 @@ typedef struct
     uint32_t               cnv_buf[2];
     uint8_t                buf_idx;     /**< Индекс активного буфера (0 или 1) */
 
+    uint16_t               adc_raw_last;/**< Последний валидный raw ADC код */
     float_t                i_meas;      /**< Измеренный ток (А) от ADC0 SE1    */
     float_t                i_ref;       /**< Задание тока RMS (А)              */
     uint32_t               fault_flags; /**< Маска активных аварий             */
     uint32_t               isr_count;   /**< Счётчик вызовов ISR (сбрасывается Monitor) */
+    uint8_t                mon_partial_window; /**< 1: окно Monitor содержит переход состояния */
 } spwm_t;
 
 /* ───────────────────────────────────────────────────────────────────────────

@@ -27,6 +27,15 @@
 #include "board_init_ext.h"
 
 /* ═══════════════════════════════════════════════════════════════════════
+ * Выбор режима формирования синусоиды:
+ *   SINE_MODE_TABLE — быстрое чтение из предвычисленной ROM-таблицы (50 точек).
+ *                     Без float-вычислений в ISR, ~2-5 тактов на шаг.
+ *   SINE_MODE_CALC  — GFLIB_Sin_FLT_C() напрямую в DMA ISR.
+ *                     Точнее, но ~50-60 тактов FPU на шаг.
+ * ═══════════════════════════════════════════════════════════════════════ */
+#define SINE_MODE_SELECT   SINE_MODE_TABLE
+
+/* ═══════════════════════════════════════════════════════════════════════
  * Задача мониторинга (1 раз в секунду)
  * Выводит состояние КА, ток, счётчик ISR и маску аварий.
  * ═══════════════════════════════════════════════════════════════════════ */
@@ -48,14 +57,31 @@ static void Monitor_Task(void *pvParameters)
             default:                    state_str = "UNKNOWN";   break;
         }
 
-        PRINTF("[MON] State=%-10s I=%.3f A  ISR/s=%-6lu  Faults=0x%02lX  Mode=%s\r\n",
-               state_str,
-               (double)spwm->i_meas,
-               (unsigned long)spwm->isr_count,
-               (unsigned long)spwm->fault_flags,
-               (spwm->sine.mode == SINE_MODE_TABLE) ? "TABLE" : "CALC");
+                unsigned long isr_meas = (unsigned long)spwm->isr_count;
+                long i_mA = (long)(spwm->i_meas * 1000.0f);
+                const char *diag = "";
+                const char *note = "";
+                if ((spwm->state == SPWM_STATE_SOFTSTART) && (isr_meas == 0U))
+                {
+                        diag = "  WARN=no DMA ISR (FTM1_CH0 DMA trigger path)";
+                }
+                if (spwm->mon_partial_window != 0U)
+                {
+                        note = "  note=partial-window";
+                }
+
+                PRINTF("[MON] State=%-10s I=%-6ld mA  ISR/s=%-5u (meas=%-6lu)  Faults=0x%02lX  Mode=%s%s%s\r\n",
+                             state_str,
+                             i_mA,
+                             (unsigned)SPWM_FSW_HZ,
+                             isr_meas,
+                             (unsigned long)spwm->fault_flags,
+                             (spwm->sine.mode == SINE_MODE_TABLE) ? "TABLE" : "CALC",
+                             note,
+                             diag);
 
         spwm->isr_count = 0U;
+                spwm->mon_partial_window = 0U;
     }
 }
 
@@ -103,12 +129,13 @@ int main(void)
     PRINTF(  "+==================================================+\r\n\r\n");
     PRINTF("Controls:\r\n");
     PRINTF("  PTB0 (pin34) - START / STOP / FAULT RESET\r\n");
-    PRINTF("  PTB1 (pin33) - TABLE / CALC sine mode\r\n");
+    PRINTF("  Sine mode    - %s (define SINE_MODE_SELECT in MKE18F16_inverter.c)\r\n",
+           (SINE_MODE_SELECT == SINE_MODE_TABLE) ? "TABLE" : "CALC");
     PRINTF("  PTC9 (pin35) - FAULT LED (active high)\r\n\r\n");
 
     /* ── 2. SPWM-движок (вызывать ПОСЛЕ BOARD_InitBootPeripherals) ── */
     spwm_t *spwm = SPWM_GetInstance();
-    SPWM_Init(spwm, SINE_MODE_TABLE);
+    SPWM_Init(spwm, SINE_MODE_SELECT);
     /*
      * SPWM_Init():
      *   - SineGen_Init(): 50 × GFLIB_Sin_FLT_C() → cnv_table[50]
@@ -118,11 +145,11 @@ int main(void)
         *     (запуск только в SPWM_Start() по кнопке PTB0)
      */
 
-    PRINTF("SPWM OK. MOD=%lu  fsw=%u Hz  I_ref=%.1f A\r\n",
+        PRINTF("SPWM OK. MOD=%lu  fsw=%u Hz  I_ref=%ld mA\r\n",
            (unsigned long)SPWM_MOD_VALUE,
            (unsigned)SPWM_FSW_HZ,
-           (double)spwm->i_ref);
-    PRINTF("Нажми PTB0 (pin34 синий) для стартаt...\r\n\r\n");
+            (long)(spwm->i_ref * 1000.0f));
+        PRINTF("Нажми PTB0 (pin34) для старта...\r\n\r\n");
 
     /* ── 3. FreeRTOS задачи ── */
     AppButtonsLed_CreateTask(spwm);

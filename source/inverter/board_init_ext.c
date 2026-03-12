@@ -31,8 +31,8 @@
  *   DMA0 / DMAMUX  bus clock
  *
  * ─── Временна́я диаграмма (50 мкс @ bus=15 МГц) ─────────────────────────────
- *   t = 0       FTM1 CNT=0 → kFTM_InitTrigger → TRGMUX → PDB0 reset
- *   t ≈ 333 нс  PDB0 IDLY=5 → DMA0 CH0 → FTM1->CnV обновлён
+ *   t = 0       FTM1 CNT=0/C0V=0 → DMA0 CH0 (прямой DMA request от FTM1_CH0)
+ *                и параллельно InitTrigger → TRGMUX → PDB0 reset
  *   t = 25 мкс  PDB0 pretrigger delay=375 → ADC0 SE1 старт
  *   t = 50 мкс  FTM1 следующее переполнение
  */
@@ -77,7 +77,7 @@ static void prv_DMA_Init(void)
 
     /* DMAMUX_Init включает kCLOCK_Dmamux0 самостоятельно */
     DMAMUX_Init(DMAMUX);
-    DMAMUX_SetSource(DMAMUX, 0U, (uint8_t)(kDmaRequestMux0PDB0 & 0xFFU));
+    DMAMUX_SetSource(DMAMUX, 0U, (uint8_t)(kDmaRequestMux0FTM1Channel0 & 0xFFU));
     DMAMUX_EnableChannel(DMAMUX, 0U);
 
     /* Handle — нужен для EDMA_AbortTransfer/StartTransfer в SPWM_DMA_ReconfTCD */
@@ -125,13 +125,26 @@ static void prv_PatchPeripherals(void)
      * но НЕ сбрасывает счётчик — FTM бежит со своим периодом 50мкс. */
     FTM1_PERIPHERAL->SYNCONF &= ~FTM_SYNCONF_SWRSTCNT_MASK;
 
-    /* TRGMUX: FTM1 InitTrigger → PDB0 trigger input 0
+    /* Оставляем исходную архитектуру проекта/MCUX:
+     * FTM1 InitTrigger → TRGMUX → PDB0 Trigger-In 8.
+     * Generated FTM1_config уже задаёт extTriggers = kFTM_InitTrigger,
+     * здесь лишь гарантируем, что CH0 trigger выключен, а InitTrigger включён. */
+    FTM1_PERIPHERAL->EXTTRIG &= ~FTM_EXTTRIG_CH0TRIG_MASK;
+    FTM1_PERIPHERAL->EXTTRIG |= FTM_EXTTRIG_INITTRIGEN_MASK;
+
+    /* TRGMUX: FTM1 InitTrigger → PDB0 trigger mux
      * Config Tools не настраивает TRGMUX вообще */
     st = TRGMUX_SetTriggerSource(TRGMUX0,
                                  (uint32_t)kTRGMUX_Pdb0,
                                  kTRGMUX_TriggerInput0,
                                  (uint32_t)kTRGMUX_SourceFtm1);
     assert(st == kStatus_Success);
+
+    /* На KE18 TRGMUX-поданный источник для PDB0 соответствует Trigger-In 8.
+     * Это же значение выбрал Config Tools в generated peripherals.c.
+     * Принудительно возвращаем TRGSEL=8, чтобы не зависеть от старых патчей. */
+    PDB0_PERIPHERAL->SC = (PDB0_PERIPHERAL->SC & ~PDB_SC_TRGSEL_MASK) |
+                          PDB_SC_TRGSEL((uint32_t)kPDB_TriggerInput8);
 
     /* PDB0 MOD: 50мкс × 15МГц = 750 тактов
      * Config Tools генерирует 5000 (по умолчанию) */
