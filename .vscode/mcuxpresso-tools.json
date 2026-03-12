@@ -1,0 +1,15 @@
+{
+  "version": "25.3",
+  "toolchainPath": "/home/gena/.mcuxpressotools/arm-gnu-toolchain-14.2.rel1-x86_64-arm-none-eabi",
+  "linkedProjects": [],
+  "trustZoneType": "none",
+  "multicoreType": "none",
+  "projectType": "sdk-freestanding",
+  "sdk": {
+    "version": "2.8.0",
+    "boardId": "",
+    "path": "",
+    "deviceId": "MKE18F512xxx16",
+    "coreId": "core0_MKE18F512xxx16"
+  }
+}
