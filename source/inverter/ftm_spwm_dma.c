@@ -131,13 +131,14 @@ static void SPWM_RuntimeArm(spwm_t *spwm)
     PDB_Enable(PDB0, true);
     PDB_DoLoadValues(PDB0);   /* LDOK: загружает MOD=750, IDLY=5, DLY0=375 — только при PDBEN=1 */
 
-    /* ДИАГНОСТИКА: один программный триггер для проверки PDB→DMA цепочки.
-     * Если после этого DMA_HRS бит0=1 или ISR/s>0 — PDB и DMA исправны,
-     * проблема только в FTM→TRGMUX→PDB триггере.
-     * TODO: убрать после подтверждения работы аппаратного триггера. */
-    PDB_DoSoftwareTrigger(PDB0);
+    /* Предзагрузить C1V актуальным значением перед запуском FTM.
+     * FTM_SetupPwmMode записал в буфер C1V=dutyValue=0. Если FTM стартует
+     * с C1V=0 и C0V=0, на первом такте SET и CLEAR происходят одновременно
+     * → всплеск на выходе. Пишем начальное значение (MOD/2) в буфер CnV,
+     * которое LDOK (ниже) загрузит в рабочий регистр до старта таймера. */
+    FTM1_PERIPHERAL->CONTROLS[1].CnV = spwm->cnv_buf[spwm->buf_idx];
 
-    FTM_SetSoftwareTrigger(SPWM_FTM_BASE, true);
+    FTM_SetSoftwareTrigger(SPWM_FTM_BASE, true);  /* LDOK: C1V_working = cnv_buf[0] = MOD/2 */
     FTM_StartTimer(SPWM_FTM_BASE, kFTM_SystemClock);
 
     g_spwm_runtime_armed = true;

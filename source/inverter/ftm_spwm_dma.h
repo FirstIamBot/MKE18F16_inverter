@@ -61,11 +61,12 @@
 #define SPWM_FTM_BASE           FTM1_PERIPHERAL         /* = FTM1           */
 #define SPWM_FTM_CHNL           kFTM_Chnl_0
 
-/* MOD для center-aligned 20 кГц при 120 МГц: F_clk/(2×F_sw) − 1 = 2999   */
-#define SPWM_MOD_VALUE          2999U
+/* MOD для edge-aligned Combined PWM 20 кГц при 120 МГц: F_clk/F_sw − 1 = 5999
+ * Combined Mode совместим только с EdgeAligned (CPWMS=0), по RM KE18.        */
+#define SPWM_MOD_VALUE          5999U
 
-/* Частота ШИМ [Гц]: F_clk / (2 × (MOD + 1)) = 120M / 6000 = 20 000       */
-#define SPWM_FSW_HZ             (FTM1_CLOCK_SOURCE / (2U * (SPWM_MOD_VALUE + 1U)))
+/* Частота ШИМ [Гц]: F_clk / (MOD + 1) = 120M / 6000 = 20 000              */
+#define SPWM_FSW_HZ             (FTM1_CLOCK_SOURCE / (SPWM_MOD_VALUE + 1U))
 
 
 /* ───────────────────────────────────────────────────────────────────────────

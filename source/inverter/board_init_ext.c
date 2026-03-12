@@ -46,7 +46,8 @@
 #include "fsl_ftm.h"
 
 /* ── Константы ──────────────────────────────────────────────────────────── */
-#define BOARD_FTM1_MOD      2999U  /* CenterAligned 20кГц@120МГц: 120M/(2×20k)−1  */
+/* FTM1_TIMER_MODULO_VALUE=5999 из peripherals.h: кол-во тактов за 1 период
+ * EdgeAligned 20кГц @ 120МГц: MOD = 120M/20k − 1 = 5999. Override не нужен. */
 #define BOARD_PDB_MOD        750U  /* 50мкс × 15МГц = 750 тактов bus              */
 #define BOARD_PDB_IDLY         5U  /* 5 × 66.67нс = 333нс                         */
 #define BOARD_PDB_PRETRIG    375U  /* 25мкс × 15МГц = 375 тактов (центр периода)  */
@@ -104,14 +105,25 @@ static void prv_PatchPeripherals(void)
 {
     status_t st;
 
-    /* FTM1 MOD: Config Tools генерирует для EdgeAligned (5999).
-     * CenterAligned 20кГц @ 120МГц: MOD = 120M/(2×20k) − 1 = 2999 */
-    FTM_SetTimerPeriod(FTM1_PERIPHERAL, BOARD_FTM1_MOD);
-
-    /* CPWMS: kFTM_CombinedPwm не устанавливает CPWMS автоматически.
-     * Без CPWMS=1 FTM1 считает только вверх (EdgeAligned, 40кГц).
-     * Устанавливаем вручную для up-down счёта (CenterAligned, 20кГц). */
-    FTM1_PERIPHERAL->SC |= FTM_SC_CPWMS_MASK;
+    /* FTM1 MOD=5999 уже выставлен FTM1_init() → FTM_SetTimerPeriod(FTM1,5999).
+     * Override здесь не нужен.
+     *
+     * CPWMS: Combined PWM по RM KE18 работает ТОЛЬКО при CPWMS=0 (EdgeAligned).
+     * SDK FTM_SetupPwmMode(kFTM_CombinedPwm) явно сбрасывает CPWMS=0.
+     * Установка CPWMS=1 повреждает Combined Mode → нет ШИМ.
+     * Оставляем CPWMS=0: EdgeAligned Combined Complementary PWM 20кГц.
+     *   Period = MOD+1 = 6000 тактов × (1/120МГц) = 50мкс = 20кГц ✓
+     *   PDB MOD = 750 тактов bus (15МГц) → тот же период ✓
+     *   Midpoint для ADC trigger: 3000 тактов FTM = 375 тактов bus ✓
+     *
+     * SWRSTCNT: FTM_Init/FTM_SetPwmSync выставляет этот бит для kFTM_SoftwareTrigger.
+     * При SWRSTCNT=1 каждый FTM_SetSoftwareTrigger() из DMA ISR сбрасывает
+     * счётчик FTM в 0, что снова запускает InitTrigger→PDB→DMA→ISR→сброс.
+     * Образуется 333нс петля: счётчик никогда не достигает C1V,
+     * выход постоянно HIGH (всплеск при старте) и нет ШИМ.
+     * Сброс SWRSTCNT: SW trigger по-прежнему загружает буферы CnV (SWWRBUF),
+     * но НЕ сбрасывает счётчик — FTM бежит со своим периодом 50мкс. */
+    FTM1_PERIPHERAL->SYNCONF &= ~FTM_SYNCONF_SWRSTCNT_MASK;
 
     /* TRGMUX: FTM1 InitTrigger → PDB0 trigger input 0
      * Config Tools не настраивает TRGMUX вообще */
